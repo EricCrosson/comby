@@ -1,6 +1,8 @@
 open Core
 open MParser
 
+open MParser_PCRE
+
 open Configuration
 open Match
 open Range
@@ -233,6 +235,32 @@ module Make (Syntax : Syntax.S) (Info : Info.S) = struct
 
   let alphanum_hole_parser () =
     string ":[[" >> hole_body () << string "]]"
+
+
+  let regex_body () =
+    let expr =
+      (* Need to handle [[:alpha:]+] (match alpha and plus characters) *)
+      choice
+        [ ((char '[' >>
+            (many1 (
+                choice
+                  [ (char '\\' >> any_char |>> fun c -> (Format.sprintf "\\%c" c))
+                  ; (is_not (char ']') |>> Char.to_string)
+                  ])
+             << char ']' |>> fun char_class -> (Format.sprintf "[%s]" @@ String.concat char_class)))
+          )
+        ; (many1 (is_not (char ']')) |>> String.of_char_list)
+        ]
+    in
+    let regex_identifier () =
+      identifier () >>= fun v -> char '~' >> expr >>= fun e -> return (Format.sprintf "%s~%s" v e)
+    in
+    regex_identifier () >>= fun identifier ->
+    Format.printf "Accepted %s@." identifier;
+    return (false, identifier)
+
+  let regex_hole_parser () =
+    string ":[" >> regex_body () << string "]"
 
   let reserved_holes () =
     let alphanum = alphanum_hole_parser () |>> snd in
@@ -542,6 +570,17 @@ module Make (Syntax : Syntax.S) (Info : Info.S) = struct
         | Success Hole { sort; identifier; optional; dimension } ->
           begin
             match sort with
+            | Regex ->
+              let identifier, pattern = String.lsplit2_exn identifier ~on:'~' in
+              Format.printf "Regex: Id: %s Pat: %s@." identifier pattern;
+              let module R = MakeRegexp(Regexp) in
+              let compiled_regexp = R.make_regexp pattern in
+              let regexp_parser = R.regexp compiled_regexp in
+              let hole_semantics = regexp_parser >>= fun result ->
+                Format.printf "Regex success: %s@." result;
+                return [result]
+              in
+              (record_matches identifier hole_semantics)::acc
             | Alphanum ->
               let allowed =  choice [alphanum; char '_'] |>> String.of_char in
               let hole_semantics = many1 allowed in
@@ -700,6 +739,7 @@ module Make (Syntax : Syntax.S) (Info : Info.S) = struct
       | Line -> line_hole_parser ()
       | Blank -> blank_hole_parser ()
       | Alphanum -> alphanum_hole_parser ()
+      | Regex -> regex_hole_parser ()
     in
     let skip_signal hole = skip (string "_signal_hole") |>> fun () -> Hole hole in
     hole_parser |>> fun (optional, identifier) -> skip_signal { sort; identifier; dimension; optional }
